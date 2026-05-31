@@ -25,6 +25,7 @@ MIDDLEWARE = [
 ]
 
 ROOT_URLCONF = "config.urls"
+STATIC_URL = "static/"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",

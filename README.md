@@ -25,7 +25,9 @@ you decide what's wrong and how to fix it; let the AI handle the typing.
 
 ## Running it
 
-    pip install -r requirements.txt
+    python3 -m venv .venv
+    source .venv/bin/activate
+    python -m pip install -r requirements.txt
     python manage.py migrate
     python manage.py shell < seed.py      # prints alice's id + product ids
     python manage.py runserver

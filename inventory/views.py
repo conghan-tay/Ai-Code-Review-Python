@@ -83,14 +83,18 @@ def place_order(request, customer_id):
 
 def find_low_stock(request):
     """Return products below a threshold. Threshold defaults to 5."""
-    threshold = request.GET.get("threshold")
-    if threshold == None:
-        threshold = 5
+    raw_threshold = request.GET.get("threshold", "5")
+    try:
+        threshold = int(raw_threshold)
+    except ValueError:
+        return JsonResponse(
+            {"error": "threshold must be an integer"},
+            status=400,
+        )
 
     low = []
-    for product in Product.objects.all():
-        if product.quantity_on_hand < threshold:
-            low.append({"sku": product.sku, "qty": product.quantity_on_hand})
+    for product in Product.objects.filter(quantity_on_hand__lt=threshold):
+        low.append({"sku": product.sku, "qty": product.quantity_on_hand})
 
     return JsonResponse({"low_stock": low})
 
