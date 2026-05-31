@@ -7,7 +7,7 @@ from django.http import Http404
 from django.test import Client, RequestFactory, TestCase, TransactionTestCase
 
 from inventory.models import Order, OrderItem, Product, Warehouse
-from inventory.views import place_order, restock_product
+from inventory.views import order_summary, place_order, restock_product
 
 
 class RestockProductTests(TestCase):
@@ -440,3 +440,112 @@ class PlaceOrderConcurrencyTests(TransactionTestCase):
         self.assertEqual(self.product.quantity_on_hand, 0)
         self.assertEqual(Order.objects.filter(customer=self.user).count(), 3)
         self.assertEqual(OrderItem.objects.count(), 3)
+
+
+class OrderSummaryTests(TestCase):
+    # Expected DB queries per request: 1 for User existence check, 1 for orders,
+    # 1 for the prefetched items joined with product and warehouse.
+    EXPECTED_QUERIES = 3
+
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create(username="alice")
+        self.other_user = User.objects.create(username="bob")
+
+        self.wh1 = Warehouse.objects.create(name="Main", location="SG")
+        self.wh2 = Warehouse.objects.create(name="Backup", location="MY")
+
+        self.p1 = Product.objects.create(
+            name="Widget", sku="WID-1", price_cents=1500,
+            warehouse=self.wh1, quantity_on_hand=50,
+        )
+        self.p2 = Product.objects.create(
+            name="Gadget", sku="GAD-1", price_cents=4200,
+            warehouse=self.wh1, quantity_on_hand=50,
+        )
+        self.p3 = Product.objects.create(
+            name="Gizmo", sku="GIZ-1", price_cents=999,
+            warehouse=self.wh2, quantity_on_hand=50,
+        )
+
+        self.order_a = Order.objects.create(
+            customer=self.user, status=Order.STATUS_PAID,
+        )
+        OrderItem.objects.create(order=self.order_a, product=self.p1, quantity=2)
+        OrderItem.objects.create(order=self.order_a, product=self.p2, quantity=1)
+
+        self.order_b = Order.objects.create(
+            customer=self.user, status=Order.STATUS_SHIPPED,
+        )
+        OrderItem.objects.create(order=self.order_b, product=self.p3, quantity=4)
+
+        self.url = f"/api/customers/{self.user.pk}/orders/"
+
+    # --- Shape ---
+
+    def test_returns_expected_shape(self):
+        """Each order surfaces its lines with the correct product/warehouse/quantity."""
+        resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+
+        body = resp.json()
+        self.assertIn("orders", body)
+        orders_by_id = {o["order_id"]: o for o in body["orders"]}
+        self.assertEqual(set(orders_by_id), {self.order_a.pk, self.order_b.pk})
+
+        a = orders_by_id[self.order_a.pk]
+        self.assertEqual(a["status"], Order.STATUS_PAID)
+        self.assertEqual(a["total_cents"], 1500 * 2 + 4200 * 1)
+        lines_by_product = {line["product"]: line for line in a["lines"]}
+        self.assertEqual(lines_by_product["Widget"]["warehouse"], "Main")
+        self.assertEqual(lines_by_product["Widget"]["quantity"], 2)
+        self.assertEqual(lines_by_product["Gadget"]["quantity"], 1)
+
+        b = orders_by_id[self.order_b.pk]
+        self.assertEqual(b["status"], Order.STATUS_SHIPPED)
+        self.assertEqual(b["total_cents"], 999 * 4)
+        self.assertEqual(b["lines"][0]["warehouse"], "Backup")
+
+    def test_empty_for_customer_with_no_orders(self):
+        """A customer with no orders gets a 200 and an empty list."""
+        resp = self.client.get(f"/api/customers/{self.other_user.pk}/orders/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"orders": []})
+
+    # --- 404 ---
+
+    def test_nonexistent_customer_returns_404(self):
+        """An unknown customer_id raises Http404.
+
+        Uses RequestFactory to bypass Django's page_not_found template renderer
+        (same reason as the other 404 tests in this module).
+        """
+        request = RequestFactory().get("/api/customers/99999/orders/")
+        with self.assertRaises(Http404):
+            order_summary(request, customer_id=99999)
+
+    # --- N+1 regression ---
+
+    def test_query_count_is_constant_with_seeded_data(self):
+        """The endpoint issues a fixed number of queries with the setUp data."""
+        with self.assertNumQueries(self.EXPECTED_QUERIES):
+            self.client.get(self.url)
+
+    def test_query_count_does_not_grow_with_orders_and_items(self):
+        """Adding more orders and items must not increase the query count.
+
+        Direct regression guard for the N+1 fix: prefetch_related + select_related
+        means cost stays at EXPECTED_QUERIES regardless of how many rows match.
+        """
+        for _ in range(5):
+            extra = Order.objects.create(
+                customer=self.user, status=Order.STATUS_PAID,
+            )
+            OrderItem.objects.create(order=extra, product=self.p1, quantity=3)
+            OrderItem.objects.create(order=extra, product=self.p2, quantity=2)
+            OrderItem.objects.create(order=extra, product=self.p3, quantity=1)
+
+        with self.assertNumQueries(self.EXPECTED_QUERIES):
+            resp = self.client.get(self.url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(resp.json()["orders"]), 2 + 5)

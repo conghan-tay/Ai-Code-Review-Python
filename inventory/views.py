@@ -2,7 +2,7 @@ import logging
 
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import F
+from django.db.models import F, Prefetch
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_http_methods
@@ -42,7 +42,12 @@ def restock_product(request, product_id):
 def order_summary(request, customer_id):
     """Return a summary of all orders for a customer."""
     customer = get_object_or_404(User, pk=customer_id)
-    orders = Order.objects.filter(customer=customer)
+    orders = Order.objects.filter(customer=customer).prefetch_related(
+        Prefetch(
+            "items",
+            queryset=OrderItem.objects.select_related("product__warehouse"),
+        )
+    )
 
     summary = []
     for order in orders:
