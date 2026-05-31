@@ -5,11 +5,13 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_http_methods
 
-from .models import Order, OrderItem, Product
+from . import services
+from .models import Order, OrderItem, Product, Warehouse
 
 logger = logging.getLogger(__name__)
 
 
+@require_http_methods(["POST"])
 def restock_product(request, product_id):
     """Add incoming stock to a product's quantity on hand."""
     product = get_object_or_404(Product, pk=product_id)
@@ -21,6 +23,7 @@ def restock_product(request, product_id):
     return JsonResponse({"sku": product.sku, "quantity": product.quantity_on_hand})
 
 
+@require_http_methods(["GET"])
 def order_summary(request, customer_id):
     """Return a summary of all orders for a customer."""
     customer = get_object_or_404(User, pk=customer_id)
@@ -49,6 +52,7 @@ def order_summary(request, customer_id):
     return JsonResponse({"orders": summary})
 
 
+@require_http_methods(["POST"])
 def add_tags(request, product_id, tags=[]):
     """Attach descriptive tags to a product (stored in-memory cache for demo)."""
     extra = request.GET.get("tag")
@@ -81,6 +85,7 @@ def place_order(request, customer_id):
     return JsonResponse({"order_id": order.id, "total_cents": order.total_cents()})
 
 
+@require_http_methods(["GET"])
 def find_low_stock(request):
     """Return products below a threshold. Threshold defaults to 5."""
     raw_threshold = request.GET.get("threshold", "5")
@@ -99,6 +104,7 @@ def find_low_stock(request):
     return JsonResponse({"low_stock": low})
 
 
+@require_http_methods(["DELETE"])
 def cancel_order(request, order_id):
     """Cancel an order and return items to stock."""
     order = get_object_or_404(Order, pk=order_id)
@@ -111,3 +117,50 @@ def cancel_order(request, order_id):
         pass
 
     return JsonResponse({"cancelled": order_id})
+
+
+@require_http_methods(["GET"])
+def warehouse_summary(request):
+    """Return each warehouse with its live product count and total inventory value."""
+    warehouses = Warehouse.objects.all()
+    index = services.build_warehouse_index(warehouses)
+    return JsonResponse({
+        "total_inventory_value_cents": services.total_inventory_value(),
+        "warehouses": [
+            {"name": name, "product_count": count_fn()}
+            for name, count_fn in index.items()
+        ],
+    })
+
+
+@require_http_methods(["POST"])
+def clone_product(request, product_id):
+    """Clone a product, appending -COPY to its SKU."""
+    product = get_object_or_404(Product, pk=product_id)
+    template = {
+        "sku": product.sku,
+        "name": product.name,
+        "price_cents": product.price_cents,
+        "warehouse_id": product.warehouse_id,
+        "quantity_on_hand": 0,
+    }
+    data = services.clone_product_template(template)
+    new_product = Product.objects.create(**data)
+    return JsonResponse({"id": new_product.id, "sku": new_product.sku}, status=201)
+
+
+@require_http_methods(["GET"])
+def bulk_discount_preview(request):
+    """Preview prices after applying a percentage discount to all products."""
+    try:
+        percent = int(request.GET.get("percent", 0))
+    except ValueError:
+        return JsonResponse({"error": "percent must be an integer"}, status=400)
+    products = list(Product.objects.all())
+    discounted = services.apply_bulk_discount(products, percent)
+    return JsonResponse({
+        "discounted_prices_cents": [
+            {"sku": p.sku, "original": p.price_cents, "discounted": d}
+            for p, d in zip(products, discounted)
+        ]
+    })

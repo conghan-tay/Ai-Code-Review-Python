@@ -17,4 +17,6 @@ p2 = Product.objects.create(name="Gadget", sku="GAD-1", price_cents=4200,
 o = Order.objects.create(customer=alice)
 OrderItem.objects.create(order=o, product=p1, quantity=2)
 OrderItem.objects.create(order=o, product=p2, quantity=1)
+o.status = Order.STATUS_PAID
+o.save()
 print("Seeded. alice id =", alice.id, "| product ids:", p1.id, p2.id)
