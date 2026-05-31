@@ -1,6 +1,8 @@
 import logging
 
 from django.contrib.auth.models import User
+from django.db import transaction
+from django.db.models import F
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.http import require_http_methods
@@ -11,14 +13,27 @@ from .models import Order, OrderItem, Product, Warehouse
 logger = logging.getLogger(__name__)
 
 
+class _StockError(Exception):
+    def __init__(self, pid):
+        self.pid = pid
+
+
 @require_http_methods(["POST"])
 def restock_product(request, product_id):
     """Add incoming stock to a product's quantity on hand."""
     product = get_object_or_404(Product, pk=product_id)
-    amount = int(request.GET.get("amount", 0))
 
-    product.quantity_on_hand = product.quantity_on_hand + amount
-    product.save()
+    try:
+        amount = int(request.POST.get("amount", 0))
+    except (ValueError, TypeError):
+        return JsonResponse({"error": "amount must be an integer"}, status=400)
+
+    if amount <= 0:
+        return JsonResponse({"error": "amount must be a positive integer"}, status=400)
+
+    product.quantity_on_hand = F("quantity_on_hand") + amount
+    product.save(update_fields=["quantity_on_hand"])
+    product.refresh_from_db(fields=["quantity_on_hand"])
 
     return JsonResponse({"sku": product.sku, "quantity": product.quantity_on_hand})
 
@@ -71,16 +86,22 @@ def place_order(request, customer_id):
     customer = get_object_or_404(User, pk=customer_id)
     requested = request.POST.getlist("product_id")
 
-    order = Order.objects.create(customer=customer)
-
-    for pid in requested:
-        product = Product.objects.get(pk=pid)
-        product.quantity_on_hand = product.quantity_on_hand - 1
-        product.save()
-        OrderItem.objects.create(order=order, product=product, quantity=1)
-
-    order.status = Order.STATUS_PAID
-    order.save()
+    try:
+        with transaction.atomic():
+            order = Order.objects.create(customer=customer)
+            for pid in requested:
+                product = Product.objects.select_for_update().get(pk=pid)
+                if product.quantity_on_hand <= 0:
+                    raise _StockError(pid)
+                product.quantity_on_hand -= 1
+                product.save()
+                OrderItem.objects.create(order=order, product=product, quantity=1)
+            order.status = Order.STATUS_PAID
+            order.save()
+    except Product.DoesNotExist:
+        return JsonResponse({"error": "product not found"}, status=404)
+    except _StockError as e:
+        return JsonResponse({"error": f"product {e.pid} is out of stock"}, status=409)
 
     return JsonResponse({"order_id": order.id, "total_cents": order.total_cents()})
 
