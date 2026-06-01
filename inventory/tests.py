@@ -7,6 +7,7 @@ from django.http import Http404
 from django.test import Client, RequestFactory, TestCase, TransactionTestCase
 
 from inventory.models import Order, OrderItem, Product, Warehouse
+from inventory.services import build_warehouse_index
 from inventory.views import order_summary, place_order, restock_product
 
 
@@ -549,3 +550,96 @@ class OrderSummaryTests(TestCase):
             resp = self.client.get(self.url)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(resp.json()["orders"]), 2 + 5)
+
+
+class BuildWarehouseIndexTests(TestCase):
+    """Unit tests for inventory.services.build_warehouse_index.
+
+    These tests are written against the *intended* contract of the function:
+    each warehouse name maps to a callable that returns that warehouse's own
+    product count. Two cases below are expected to FAIL against the current
+    implementation, which suffers from Python's late-binding closure bug —
+    every lambda resolves `w` to the last warehouse in the loop. The bug fix
+    will make these tests pass without modification.
+    """
+
+    def setUp(self):
+        self.wh_a = Warehouse.objects.create(name="Alpha", location="SG")
+        self.wh_b = Warehouse.objects.create(name="Beta", location="SG")
+        self.wh_c = Warehouse.objects.create(name="Gamma", location="SG")
+
+        self._add_products(self.wh_a, 1)
+        self._add_products(self.wh_b, 2)
+        self._add_products(self.wh_c, 3)
+
+    def _add_products(self, warehouse, n):
+        for i in range(n):
+            Product.objects.create(
+                name=f"{warehouse.name}-P{i}",
+                sku=f"{warehouse.name}-{i}",
+                price_cents=100,
+                warehouse=warehouse,
+                quantity_on_hand=0,
+            )
+
+    # --- Baseline / structural ---
+
+    def test_empty_input_returns_empty_dict(self):
+        """An empty iterable produces an empty index."""
+        self.assertEqual(build_warehouse_index([]), {})
+
+    def test_dict_keys_are_warehouse_names(self):
+        """Returned dict is keyed by each warehouse's .name."""
+        index = build_warehouse_index([self.wh_a, self.wh_b, self.wh_c])
+        self.assertEqual(set(index.keys()), {"Alpha", "Beta", "Gamma"})
+
+    def test_single_warehouse_callable_returns_correct_count(self):
+        """With one warehouse the late-binding bug cannot manifest.
+
+        Establishes that the callable shape itself is correct, so any failure
+        in the multi-warehouse cases below is unambiguously the closure bug.
+        """
+        index = build_warehouse_index([self.wh_a])
+        self.assertEqual(index["Alpha"](), 1)
+
+    # --- Bug-exposing cases (EXPECTED TO FAIL against current code) ---
+
+    def test_first_warehouse_callable_returns_its_own_count(self):
+        """Alpha's callable must report Alpha's product count (1), not Gamma's."""
+        index = build_warehouse_index([self.wh_a, self.wh_b, self.wh_c])
+        self.assertEqual(index["Alpha"](), 1)
+
+    def test_middle_warehouse_callable_returns_its_own_count(self):
+        """Beta's callable must report Beta's product count (2), not Gamma's."""
+        index = build_warehouse_index([self.wh_a, self.wh_b, self.wh_c])
+        self.assertEqual(index["Beta"](), 2)
+
+    # --- Behaviours that should keep working after the fix ---
+
+    def test_last_warehouse_callable_returns_its_own_count(self):
+        """Gamma's callable returns 3.
+
+        Under the current bug this passes 'for the wrong reason' (the lambda
+        happens to close over Gamma because it was the last loop value). The
+        test still belongs here so it locks the correct count in place after
+        the fix lands.
+        """
+        index = build_warehouse_index([self.wh_a, self.wh_b, self.wh_c])
+        self.assertEqual(index["Gamma"](), 3)
+
+    def test_callable_is_idempotent(self):
+        """Calling the same callable twice returns the same value."""
+        index = build_warehouse_index([self.wh_a, self.wh_b, self.wh_c])
+        self.assertEqual(index["Gamma"](), index["Gamma"]())
+
+    def test_callable_reflects_live_product_count(self):
+        """Docstring contract: counts are computed lazily on each call.
+
+        Single-warehouse input isolates this property from the closure bug —
+        we are testing only that the callable re-queries the DB rather than
+        caching a stale count.
+        """
+        index = build_warehouse_index([self.wh_a])
+        before = index["Alpha"]()
+        self._add_products(self.wh_a, 1)
+        self.assertEqual(index["Alpha"](), before + 1)
