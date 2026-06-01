@@ -27,7 +27,7 @@ def build_warehouse_index(warehouses):
     """
     index = {}
     for w in warehouses:
-        index[w.name] = lambda: w.products.count()
+        index[w.name] = lambda w=w: w.products.count()
     return index
 
 

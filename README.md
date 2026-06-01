@@ -27,6 +27,7 @@ you decide what's wrong and how to fix it; let the AI handle the typing.
 
     python3 -m venv .venv
     source .venv/bin/activate
+    cp .env.example .env      # then edit DJANGO_SECRET_KEY
     python -m pip install -r requirements.txt
     python manage.py migrate
     python manage.py shell < seed.py      # prints alice's id + product ids
