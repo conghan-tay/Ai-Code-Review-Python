@@ -1,10 +1,33 @@
+import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+from dotenv import load_dotenv
 
-SECRET_KEY = "django-insecure-2k9d8f7g6h5j4k3l2m1n0p9o8i7u6y5t4r3e2w1q"
-DEBUG = True
-ALLOWED_HOSTS = ["*"]
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+
+def _env_bool(name, default=False):
+    return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_list(name):
+    raw = os.environ.get(name, "")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+DEBUG = _env_bool("DJANGO_DEBUG", default=False)
+
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "django-insecure-dev-only-not-for-production"
+    else:
+        raise RuntimeError("DJANGO_SECRET_KEY must be set when DEBUG is False.")
+
+ALLOWED_HOSTS = _env_list("DJANGO_ALLOWED_HOSTS")
+if not ALLOWED_HOSTS and not DEBUG:
+    raise RuntimeError("DJANGO_ALLOWED_HOSTS must be set when DEBUG is False.")
 
 INSTALLED_APPS = [
     "django.contrib.admin",
